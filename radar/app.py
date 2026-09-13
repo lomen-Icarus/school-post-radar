@@ -86,7 +86,10 @@ async def run(settings: Settings) -> None:
         )
     finally:
         scheduler.shutdown(wait=False)
-        await dp.stop_polling()
+        try:
+            await dp.stop_polling()
+        except RuntimeError:  # polling уже завершился (например, из-за ошибки) — просто убираем задачу
+            pass
         polling.cancel()
         try:
             await polling

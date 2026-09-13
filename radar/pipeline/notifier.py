@@ -65,8 +65,14 @@ class Notifier:
                 out.append(c)
         return out
 
+    def _window_hours(self, sub: repo.Subscriber) -> int:
+        """Глубина выборки: не меньше LOOKBACK_HOURS, а для редких дайджестов — весь интервал с запасом."""
+        if sub.mode == "digest" and sub.interval_days > 1:
+            return max(self.settings.lookback_hours, sub.interval_days * 24 + 12)
+        return self.settings.lookback_hours
+
     async def _pending_for(self, sub: repo.Subscriber) -> list[repo.Candidate]:
-        since = now_utc() - timedelta(hours=self.settings.lookback_hours)
+        since = now_utc() - timedelta(hours=self._window_hours(sub))
         items = await repo.list_pending_for_chat(self.db, sub.chat_id, since, self.settings.min_confidence)
         enabled = await repo.enabled_region_ids(self.db, sub.profile_id)
         return self._filter_regions(items, enabled)
@@ -111,26 +117,28 @@ class Notifier:
                 )
 
     async def _deliver_digest_inner(self, sub: repo.Subscriber, *, manual: bool) -> int:
-        items = await self._pending_for(sub)
         channel = "manual" if manual else "digest"
         async with self._send_lock:
+            # Выборка под замком: ручной /digest и плановый дайджест не отправят одно и то же дважды.
+            items = await self._pending_for(sub)
             if not items:
                 if sub.notify_empty or manual:
                     await self._send(
                         sub.chat_id,
-                        f"🏆 Новых достижений за последние {self.settings.lookback_hours} ч не найдено.",
+                        f"🏆 Новых достижений за последние {self._window_hours(sub)} ч не найдено.",
                     )
                 return 0
             when = humanize_local(now_utc(), sub.timezone)
             header = formatting.digest_header(len(items), sub.timezone, when)
             delivered = 0
             if sub.digest_format == "list":
-                for text in formatting.format_digest_list(items, sub.timezone, header):
+                for text, chunk_items in formatting.format_digest_list(items, sub.timezone, header):
                     if await self._send(sub.chat_id, text) is None:
-                        return 0
-                for c in items:
-                    await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, None)
-                delivered = len(items)
+                        break
+                    for c in chunk_items:
+                        await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, None)
+                    await self.db.commit()
+                    delivered += len(chunk_items)
             else:
                 if await self._send(sub.chat_id, header) is None:
                     return 0

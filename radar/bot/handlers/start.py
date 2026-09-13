@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from radar.bot import keyboards, texts
@@ -15,18 +16,18 @@ router = Router(name="start")
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, db: Database, subscriber: repo.Subscriber, subscriber_created: bool
+    message: Message, db: Database, subscriber: repo.Subscriber, subscriber_created: bool, state: FSMContext
 ) -> None:
-    await render_main(
-        db,
-        message,
-        subscriber,
-        intro=texts.welcome(message.from_user.first_name if message.from_user else None, subscriber_created),
-    )
+    await state.clear()
+    first_name = message.from_user.first_name if message.from_user else None
+    await render_main(db, message, subscriber, intro=texts.welcome(first_name, subscriber_created))
 
 
 @router.message(Command("settings", "menu"))
-async def cmd_settings(message: Message, db: Database, subscriber: repo.Subscriber) -> None:
+async def cmd_settings(
+    message: Message, db: Database, subscriber: repo.Subscriber, state: FSMContext
+) -> None:
+    await state.clear()
     await render_main(db, message, subscriber)
 
 
@@ -36,7 +37,8 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.callback_query(MenuCb.filter(F.section == "main"))
-async def cb_main(query: CallbackQuery, db: Database, subscriber: repo.Subscriber) -> None:
+async def cb_main(query: CallbackQuery, db: Database, subscriber: repo.Subscriber, state: FSMContext) -> None:
+    await state.clear()
     await render_main(db, query, subscriber)
     await query.answer()
 

@@ -86,30 +86,17 @@ async def upsert_subscriber(
         "ON CONFLICT(profile_id) DO NOTHING",
         (profile_id,),
     )
-    if existing is None:
-        await db.execute(
-            """
-            INSERT INTO subscribers (chat_id, profile_id, username, first_name, digest_times, timezone,
-                                     created_at, updated_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                chat_id,
-                profile_id,
-                username,
-                first_name,
-                default_digest_times,
-                default_timezone,
-                now,
-                now,
-                now,
-            ),
-        )
-    else:
-        await db.execute(
-            "UPDATE subscribers SET username = ?, first_name = ?, last_seen_at = ? WHERE chat_id = ?",
-            (username, first_name, now, chat_id),
-        )
+    # Вставка идемпотентна: два одновременных первых сообщения из одного чата не дадут IntegrityError.
+    await db.execute(
+        """
+        INSERT INTO subscribers (chat_id, profile_id, username, first_name, digest_times, timezone,
+                                 created_at, updated_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            username = excluded.username, first_name = excluded.first_name, last_seen_at = excluded.last_seen_at
+        """,
+        (chat_id, profile_id, username, first_name, default_digest_times, default_timezone, now, now, now),
+    )
     await db.commit()
     sub = await get_subscriber(db, chat_id)
     assert sub is not None
@@ -264,11 +251,14 @@ async def list_scan_targets(db: Database, monitor_scope: str = "all") -> list[Sc
         ORDER BY c.community_key
         """
     )
+    # Связи сообществ-дубликатов (duplicate_of) приписываются каноническому сообществу,
+    # чтобы его посты относились ко всем школам и территориям, которые на него ссылаются.
     links = await db.fetchall(
         f"""
-        SELECT uc.community_key, u.unit_id, u.name, u.municipality_id
+        SELECT COALESCE(c.duplicate_of, c.community_key) AS community_key, u.unit_id, u.name, u.municipality_id
         FROM unit_communities uc
         JOIN units u ON u.unit_id = uc.unit_id
+        JOIN communities c ON c.community_key = uc.community_key
         WHERE u.scope = 'school' AND {_scope_condition(monitor_scope)}
         ORDER BY u.name
         """

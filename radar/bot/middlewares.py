@@ -31,8 +31,10 @@ class AccessMiddleware(BaseMiddleware):
             return await handler(event, data)
         user = data.get("event_from_user")
         if user is None or user.id not in self.allowed:
+            # Отвечаем только на команды в личке; в группах и на обычный текст молчим, чтобы не спамить.
             if isinstance(event, Message):
-                await event.answer("⛔️ Доступ к боту ограничен. Обратитесь к администратору.")
+                if event.chat.type == "private" and (event.text or "").startswith("/"):
+                    await event.answer("⛔️ Доступ к боту ограничен. Обратитесь к администратору.")
             elif isinstance(event, CallbackQuery):
                 await event.answer("Доступ ограничен", show_alert=True)
             return None

@@ -105,12 +105,12 @@ async def cb_sched_custom(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
 
 
-@router.message(ScheduleForm.custom_times, F.text)
+@router.message(ScheduleForm.custom_times, F.text, ~F.text.startswith("/"))
 async def on_custom_times(
     message: Message, state: FSMContext, db: Database, subscriber: repo.Subscriber
 ) -> None:
     raw = (message.text or "").strip()
-    if raw.lower() in ("/cancel", "отмена"):
+    if raw.lower() == "отмена":
         await state.clear()
         await render_main(db, message, subscriber, intro="Отменено.")
         return
@@ -137,10 +137,10 @@ async def cb_sched_tz(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
 
 
-@router.message(ScheduleForm.timezone, F.text)
+@router.message(ScheduleForm.timezone, F.text, ~F.text.startswith("/"))
 async def on_timezone(message: Message, state: FSMContext, db: Database, subscriber: repo.Subscriber) -> None:
     raw = (message.text or "").strip()
-    if raw.lower() in ("/cancel", "отмена"):
+    if raw.lower() == "отмена":
         await state.clear()
         await render_main(db, message, subscriber, intro="Отменено.")
         return

@@ -116,11 +116,18 @@ async def test_list_format_splits_long_digest(db, settings: Settings):
     for i in range(120):
         cid = await _candidate(db, -100 - i, 1, ["ru21-mo-kanash" if i % 2 else "ru21-city-cheboksary"])
         items.append(await repo.get_candidate(db, cid))
-    msgs = formatting.format_digest_list(
+    chunks = formatting.format_digest_list(
         items, "Europe/Moscow", formatting.digest_header(120, "Europe/Moscow")
     )
+    msgs = [text for text, _ in chunks]
     assert len(msgs) >= 2 and all(len(m) <= 4000 for m in msgs)
     assert msgs[0].startswith("<b>🏆 Дайджест: 120 достижений</b>")
+    assert sum(len(chunk_items) for _, chunk_items in chunks) == 120
+    assert all(chunk_items for _, chunk_items in chunks)
+    assert "<b>📍 Канашский</b>" in msgs[0] or "<b>📍 Чебоксары (город)</b>" in msgs[0]
+    # элементы сообщения действительно упомянуты в его тексте
+    for text, chunk_items in chunks:
+        assert all(c.url in text for c in chunk_items)
     assert formatting.digest_header(1, "Europe/Moscow").startswith("<b>🏆 Дайджест: 1 достижение</b>")
     assert "3 достижения" in formatting.digest_header(3, "Europe/Moscow")
     assert "11 достижений" in formatting.digest_header(11, "Europe/Moscow")

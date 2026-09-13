@@ -124,3 +124,36 @@ async def test_resolve_pending_marks_duplicates_and_failures(db, settings, fake_
     assert stats["unresolved"] == 1 and stats["failed"] == 1 and stats["duplicates"] == 1
     assert len(await repo.list_scan_targets(db, "all")) == 267 + 96
     await sc.vk.close()
+
+
+async def test_transient_resolve_error_keeps_pending(db, settings, fake_vk):
+    fake_vk.error_6_once = True  # первая попытка — лимит частоты; клиент повторит сам
+
+    def always_fail(request):
+        return httpx.Response(200, json={"error": {"error_code": 10, "error_msg": "Internal server error"}})
+
+    vk = VkClient(
+        "t", rps=1000, http=httpx.AsyncClient(transport=httpx.MockTransport(always_fail)), max_retries=0
+    )
+    sc = Scanner(db, vk, Classifier(None), settings)
+    assert await sc.resolve_pending(limit=500) == 0
+    stats = await repo.community_stats(db, "all")
+    assert stats["unresolved"] == 98 and stats["failed"] == 0  # ничего не помечено окончательно
+    await vk.close()
+
+
+async def test_duplicate_community_inherits_links(db, settings, fake_vk):
+    pending = await repo.list_unresolved_communities(db, 500)
+    victim = pending[0]
+    canonical_gid = int(
+        await db.scalar("SELECT group_id FROM communities WHERE group_id IS NOT NULL LIMIT 1")
+    )
+    canonical_key = await repo.community_key_by_group_id(db, canonical_gid)
+    before = {t.community_key: t for t in await repo.list_scan_targets(db, "all")}[canonical_key]
+    await repo.mark_community_resolved(db, victim["community_key"], canonical_gid, "Дубль", 0, canonical_key)
+    after = {t.community_key: t for t in await repo.list_scan_targets(db, "all")}[canonical_key]
+    victim_units = await db.fetchall(
+        "SELECT unit_id FROM unit_communities WHERE community_key = ?", (victim["community_key"],)
+    )
+    assert victim_units and all(u["unit_id"] in after.unit_ids for u in victim_units)
+    assert set(before.unit_ids) <= set(after.unit_ids)

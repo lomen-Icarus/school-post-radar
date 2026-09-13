@@ -46,48 +46,50 @@ def format_card(c: Candidate, tz_name: str) -> str:
     return "\n".join(lines)
 
 
-def format_digest_list(items: list[Candidate], tz_name: str, header: str) -> list[str]:
-    """Компактный дайджест, сгруппированный по территориям, разбитый на сообщения до 4000 символов."""
+def format_digest_list(
+    items: list[Candidate], tz_name: str, header: str
+) -> list[tuple[str, list[Candidate]]]:
+    """Компактный дайджест по территориям, разбитый на сообщения до 4000 символов.
+
+    Возвращает пары (текст сообщения, элементы в нём), чтобы доставки учитывались по факту отправки.
+    """
     groups: dict[str, list[Candidate]] = {}
     for c in items:
         groups.setdefault(_municipality_label(c), []).append(c)
-    blocks: list[str] = []
+
+    messages: list[tuple[str, list[Candidate]]] = []
+    lines: list[str] = [header]
+    current_items: list[Candidate] = []
+    current_label: str | None = None
+
+    def flush() -> None:
+        nonlocal lines, current_items, current_label
+        if current_items:
+            messages.append(("\n".join(lines), current_items))
+        lines, current_items, current_label = [], [], None
+
     for label in sorted(groups):
-        block_lines = [f"<b>📍 {escape(label)}</b>"]
+        group_header = f"<b>📍 {escape(label)}</b>"
         for c in groups[label]:
             kind_emoji = KIND_LABELS.get(c.kind or "other", "✨")[:1]
             title = escape(c.headline or "Достижение")
             school = escape(_school_label(c))
             when = humanize_local(from_iso(c.published_at), tz_name, with_date=False)
-            block_lines.append(f'{kind_emoji} <a href="{escape(c.url)}">{title}</a> — {school} · {when}')
-        blocks.append("\n".join(block_lines))
-    messages: list[str] = []
-    current = header
-    for block in blocks:
-        candidate = f"{current}\n\n{block}" if current else block
-        if len(candidate) > TG_LIMIT and current:
-            messages.append(current)
-            current = block
-        else:
-            current = candidate
-    if current:
-        messages.append(current)
-    # Если один блок больше лимита — режем по строкам.
-    final: list[str] = []
-    for msg in messages:
-        if len(msg) <= TG_LIMIT:
-            final.append(msg)
-            continue
-        chunk = ""
-        for line in msg.split("\n"):
-            if len(chunk) + len(line) + 1 > TG_LIMIT and chunk:
-                final.append(chunk)
-                chunk = line
+            line = f'{kind_emoji} <a href="{escape(c.url)}">{title}</a> — {school} · {when}'
+            if current_label == label:
+                prefix: list[str] = []
             else:
-                chunk = f"{chunk}\n{line}" if chunk else line
-        if chunk:
-            final.append(chunk)
-    return final
+                prefix = ([""] if lines else []) + [group_header]
+            projected = "\n".join([*lines, *prefix, line])
+            if len(projected) > TG_LIMIT and current_items:
+                flush()
+                prefix = [group_header]
+            lines.extend(prefix)
+            lines.append(line)
+            current_items.append(c)
+            current_label = label
+    flush()
+    return messages
 
 
 def digest_header(count: int, tz_name: str, when: str | None = None) -> str:

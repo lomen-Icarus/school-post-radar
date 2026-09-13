@@ -130,8 +130,9 @@ class Scanner:
             await self._process_slice(run, targets, run.next_index, upto, stats)
             if upto >= total:
                 await repo.finish_run(self.db, run.run_id)
-        if stats.new_candidate_ids:
-            await self._notify_new(stats.new_candidate_ids)
+        # Доставка «сразу» вызывается на каждом тике: она сама находит всё недоставленное,
+        # поэтому сбой отправки на прошлом тике не теряет карточки.
+        await self._notify_new(stats.new_candidate_ids)
         return stats
 
     async def _notify_new(self, candidate_ids: list[int]) -> None:
@@ -184,23 +185,31 @@ class Scanner:
                 by_request[ident] = row["community_key"]
         for start in range(0, len(by_request), 100):
             chunk = list(by_request)[start : start + 100]
+            errored: set[str] = set()
             try:
                 infos = await self.vk.groups_get_by_id(chunk)
             except VkApiError as exc:
                 if exc.is_auth:
                     log.error("VK: ошибка авторизации при groups.getById: %s", exc)
                     return resolved
+                if exc.code != 100:
+                    # Временная ошибка (сеть, лимиты) — оставляем адреса в очереди, попробуем на следующем тике.
+                    log.warning("groups.getById не удался (%s), повторим позже", exc)
+                    continue
                 infos = []
-                # Пакет не удался (например, один из адресов невалиден) — пробуем по одному.
+                # Один из адресов невалиден (ошибка 100) — разбираем пакет по одному.
                 for ident in chunk:
                     try:
                         infos.extend(await self.vk.groups_get_by_id([ident]))
                     except VkApiError as single_exc:
+                        errored.add(ident)
                         await repo.mark_community_resolve_failed(
-                            self.db, by_request[ident], str(single_exc), final=single_exc.is_permanent
+                            self.db, by_request[ident], str(single_exc), final=single_exc.code == 100
                         )
             found = {i.requested: i for i in infos}
             for ident in chunk:
+                if ident in errored:
+                    continue
                 key = by_request[ident]
                 info = found.get(ident)
                 if info is None:
@@ -355,6 +364,12 @@ class Scanner:
 
     async def retry_unclassified(self, limit: int = 100) -> int:
         """Повторная классификация постов, для которых модель ранее не ответила."""
+        if self._lock.locked():
+            return 0  # тик или полный обход уже классифицируют — не дублируем запросы к модели
+        async with self._lock:
+            return await self._retry_unclassified_inner(limit)
+
+    async def _retry_unclassified_inner(self, limit: int) -> int:
         since = now_utc() - timedelta(hours=self.settings.lookback_hours)
         rows = await repo.list_unclassified_posts(self.db, since, limit)
         if not rows:
