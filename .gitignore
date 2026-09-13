@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/radar.sqlite
+data/radar.sqlite-wal
+data/radar.sqlite-shm
+data/*.bak
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+logs/

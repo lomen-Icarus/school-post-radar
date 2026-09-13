@@ -1,0 +1,16 @@
+[Unit]
+Description=School Post Radar (Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radar
+WorkingDirectory=/opt/school-post-radar
+EnvironmentFile=/opt/school-post-radar/.env
+ExecStart=/opt/school-post-radar/.venv/bin/radar run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

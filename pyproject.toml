@@ -1,0 +1,44 @@
+[project]
+name = "school-post-radar"
+version = "0.1.0"
+description = "Telegram-бот: мониторинг ВК-сообществ школ Чувашии и рассылка постов о достижениях учеников"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.31,<4",
+    "aiosqlite>=0.22,<1",
+    "httpx>=0.28,<1",
+    "anthropic>=1.5,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.15,<3",
+    "APScheduler>=3.11,<4",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9,<10",
+    "pytest-asyncio>=1.4,<2",
+    "ruff>=0.16",
+]
+
+[project.scripts]
+radar = "radar.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["radar*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003", "E501"]
