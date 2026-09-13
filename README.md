@@ -39,7 +39,8 @@ docker compose logs -f
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 radar init-db          # создаст data/radar.sqlite из реестра data/registry_seed.sqlite
-radar resolve          # разрешит 98 коротких адресов ВК в числовые id (нужен VK-токен)
+radar check-token      # проверит, что VK-ключ читает стены
+radar resolve          # разрешит 98 коротких адресов ВК в числовые id
 radar run              # запуск бота
 ```
 
@@ -68,10 +69,12 @@ radar run              # запуск бота
 1. Откройте кабинет [VK ID для бизнеса](https://id.vk.ru/about/business/go) → «Создать приложение»
    (тип Web / «Сайт»; для приложений может требоваться подтверждённый бизнес-профиль).
 2. В настройках приложения найдите **«Сервисный ключ доступа»** и скопируйте его в `VK_ACCESS_TOKEN`.
-3. Проверьте одним запросом (должен вернуться список постов):
+3. Проверьте ключ: `radar check-token` (или `docker compose run --rm radar radar check-token`) — команда
+   покажет, доступны ли `groups.getById`, `wall.get` и `execute`. То же самое вручную:
 
    ```bash
-   curl "https://api.vk.ru/method/wall.get?owner_id=-10812563&count=1&v=5.199&access_token=$VK_ACCESS_TOKEN"
+   curl -H "Authorization: Bearer $VK_ACCESS_TOKEN" \
+        "https://api.vk.ru/method/wall.get?owner_id=-10812563&count=1&v=5.199"
    ```
 
 Особенности:

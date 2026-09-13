@@ -82,6 +82,38 @@ async def _scan(settings: Settings) -> None:
     await db.close()
 
 
+async def _check_token(settings: Settings) -> None:
+    from radar.vk.client import VkClient
+
+    if not settings.vk_enabled:
+        print("VK_ACCESS_TOKEN не задан")
+        sys.exit(1)
+    vk = VkClient(
+        settings.vk_access_token,
+        version=settings.vk_api_version,
+        rps=settings.vk_rps,
+        api_base=settings.vk_api_base,
+        use_execute=True,
+    )
+    try:
+        report = await vk.check_token(probe_owner_id=-10812563)  # МБОУ «Гимназия № 6», Новочебоксарск
+    finally:
+        await vk.close()
+    for method, status in report.items():
+        print(f"{method:16} {status}")
+    if report.get("wall.get") != "ok":
+        print(
+            "\nwall.get недоступен этому ключу — бот не сможет читать ленты. Нужен сервисный ключ приложения или пользовательский токен."
+        )
+        sys.exit(1)
+    if report.get("execute") == "ok":
+        print("\nexecute доступен: можно включить VK_USE_EXECUTE=1 (пакетирование запросов).")
+    else:
+        print(
+            "\nexecute недоступен (ожидаемо для сервисного ключа) — бот будет делать одиночные вызовы wall.get."
+        )
+
+
 async def _classify(settings: Settings, text: str) -> None:
     from radar.app import build_classifier
 
@@ -97,6 +129,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("init-db", help="создать/обновить рабочую базу")
     sub.add_parser("resolve", help="разрешить короткие адреса ВК в числовые id")
     sub.add_parser("scan", help="полный обход сообществ без Telegram")
+    sub.add_parser("check-token", help="проверить, какие методы VK доступны ключу")
     p_cls = sub.add_parser("classify", help="проверить классификатор на тексте")
     p_cls.add_argument("text", nargs="+")
     args = parser.parse_args(argv)
@@ -111,6 +144,8 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_resolve(_settings()))
     elif cmd == "scan":
         asyncio.run(_scan(_settings()))
+    elif cmd == "check-token":
+        asyncio.run(_check_token(_settings()))
     elif cmd == "classify":
         asyncio.run(_classify(_settings(), " ".join(args.text)))
 

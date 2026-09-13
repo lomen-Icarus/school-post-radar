@@ -61,6 +61,37 @@ async def test_groups_get_by_id_both_shapes(fake_vk):
     await client2.close()
 
 
+async def test_token_sent_as_bearer_header(fake_vk):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json={"response": {"count": 0, "items": []}})
+
+    client = VkClient(
+        "secret-token", rps=1000, http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await client.wall_get(-1)
+    assert seen["auth"] == "Bearer secret-token"
+    assert "secret-token" not in seen["body"] and "v=5.199" in seen["body"]
+    await client.close()
+
+
+async def test_check_token_report(fake_vk):
+    fake_vk.fail_execute = True
+    fake_vk.walls[-10812563] = [make_post(-10812563, 1, "a")]
+    fake_vk.groups["10812563"] = {"id": 10812563, "screen_name": "club10812563", "name": "Гимназия"}
+    client = VkClient("t", rps=1000, http=httpx.AsyncClient(transport=fake_vk.transport()), use_execute=True)
+    report = await client.check_token(-10812563)
+    assert (
+        report["wall.get"] == "ok"
+        and report["groups.getById"] == "ok"
+        and report["execute"].startswith("ошибка 28")
+    )
+    await client.close()
+
+
 async def test_service_token_mode_never_calls_execute(fake_vk):
     fake_vk.walls[-1] = [make_post(-1, 1, "a")]
     fake_vk.walls[-2] = [make_post(-2, 2, "b")]

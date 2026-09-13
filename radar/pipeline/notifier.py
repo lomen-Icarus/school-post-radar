@@ -72,25 +72,15 @@ class Notifier:
         return self._filter_regions(items, enabled)
 
     # ------------------------------------------------------------ instant
-    async def deliver_instant(self, candidate_ids: list[int]) -> int:
-        """Отправить новые кандидаты подписчикам в режиме «сразу». Возвращает число отправленных карточек."""
+    async def deliver_instant(self, candidate_ids: list[int] | None = None) -> int:
+        """Отправить подписчикам в режиме «сразу» всё ещё не доставленное (pull-модель: сбой не теряет посты)."""
         subs = await repo.list_active_subscribers(self.db, mode="instant")
-        if not subs or not candidate_ids:
+        if not subs:
             return 0
-        candidates = [c for cid in candidate_ids if (c := await repo.get_candidate(self.db, cid)) is not None]
         sent = 0
         async with self._send_lock:
             for sub in subs:
-                enabled = await repo.enabled_region_ids(self.db, sub.profile_id)
-                for c in self._filter_regions(candidates, enabled):
-                    if c.review_status == "rejected" or c.confidence < self.settings.min_confidence:
-                        continue
-                    exists = await self.db.scalar(
-                        "SELECT 1 FROM deliveries WHERE chat_id = ? AND owner_id = ? AND post_id = ?",
-                        (sub.chat_id, c.owner_id, c.post_id),
-                    )
-                    if exists:
-                        continue
+                for c in await self._pending_for(sub):
                     mid = await self._send(
                         sub.chat_id,
                         formatting.format_card(c, sub.timezone),
@@ -99,48 +89,63 @@ class Notifier:
                     if mid is None:
                         break
                     await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, "instant", mid)
+                    await self.db.commit()
                     sent += 1
-                await self.db.commit()
         return sent
 
     # ------------------------------------------------------------- digest
     async def deliver_digest(self, sub: repo.Subscriber, *, manual: bool = False) -> int:
-        """Собрать и отправить дайджест подписчику. Возвращает число достижений в нём."""
+        """Собрать и отправить дайджест подписчику. Возвращает число достижений в нём.
+
+        Расписание сдвигается всегда (кроме ручного вызова), даже если отправка не удалась:
+        недоставленные посты останутся в очереди и уйдут в следующий раз.
+        """
+        try:
+            return await self._deliver_digest_inner(sub, manual=manual)
+        finally:
+            if not manual:
+                sent_at = now_utc()
+                nxt = next_digest_after_send(sent_at, sub.digest_times, sub.interval_days, sub.timezone)
+                await repo.update_subscriber(
+                    self.db, sub.chat_id, last_digest_at=to_iso(sent_at), next_digest_at=to_iso(nxt)
+                )
+
+    async def _deliver_digest_inner(self, sub: repo.Subscriber, *, manual: bool) -> int:
         items = await self._pending_for(sub)
         channel = "manual" if manual else "digest"
         async with self._send_lock:
             if not items:
                 if sub.notify_empty or manual:
-                    await self._send(sub.chat_id, "🏆 Новых достижений за последние 48 часов не найдено.")
-            else:
-                when = humanize_local(now_utc(), sub.timezone)
-                header = formatting.digest_header(len(items), sub.timezone, when)
-                if sub.digest_format == "list":
-                    for text in formatting.format_digest_list(items, sub.timezone, header):
-                        if await self._send(sub.chat_id, text) is None:
-                            return 0
-                    for c in items:
-                        await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, None)
-                else:
-                    if await self._send(sub.chat_id, header) is None:
+                    await self._send(
+                        sub.chat_id,
+                        f"🏆 Новых достижений за последние {self.settings.lookback_hours} ч не найдено.",
+                    )
+                return 0
+            when = humanize_local(now_utc(), sub.timezone)
+            header = formatting.digest_header(len(items), sub.timezone, when)
+            delivered = 0
+            if sub.digest_format == "list":
+                for text in formatting.format_digest_list(items, sub.timezone, header):
+                    if await self._send(sub.chat_id, text) is None:
                         return 0
-                    for c in items:
-                        mid = await self._send(
-                            sub.chat_id,
-                            formatting.format_card(c, sub.timezone),
-                            reply_markup=card_keyboard(c.candidate_id, c.url),
-                        )
-                        if mid is None:
-                            break
-                        await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, mid)
-                await self.db.commit()
-        if not manual:
-            sent_at = now_utc()
-            nxt = next_digest_after_send(sent_at, sub.digest_times, sub.interval_days, sub.timezone)
-            await repo.update_subscriber(
-                self.db, sub.chat_id, last_digest_at=to_iso(sent_at), next_digest_at=to_iso(nxt)
-            )
-        return len(items)
+                for c in items:
+                    await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, None)
+                delivered = len(items)
+            else:
+                if await self._send(sub.chat_id, header) is None:
+                    return 0
+                for c in items:
+                    mid = await self._send(
+                        sub.chat_id,
+                        formatting.format_card(c, sub.timezone),
+                        reply_markup=card_keyboard(c.candidate_id, c.url),
+                    )
+                    if mid is None:
+                        break
+                    await repo.record_delivery(self.db, sub.chat_id, c.owner_id, c.post_id, channel, mid)
+                    delivered += 1
+            await self.db.commit()
+        return delivered
 
     async def dispatch_due_digests(self) -> int:
         """Вызывается планировщиком раз в минуту: отправить дайджесты, чьё время пришло."""
@@ -151,7 +156,4 @@ class Notifier:
                 total += await self.deliver_digest(sub)
             except Exception:  # один подписчик не должен ломать рассылку остальным
                 log.exception("Ошибка отправки дайджеста %s", sub.chat_id)
-                # Сдвигаем время, чтобы не зациклиться на ошибке.
-                nxt = next_digest_after_send(now_utc(), sub.digest_times, sub.interval_days, sub.timezone)
-                await repo.update_subscriber(self.db, sub.chat_id, next_digest_at=to_iso(nxt))
         return total

@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 
 # Порог, после которого сообщество с постоянной ошибкой (закрыто/удалено) отключается от опроса.
 MAX_PERMANENT_ERRORS = 3
+# Отложенные, предложенные и рекламные записи не нужны; репосты приходят как post_type='post' с copy_history.
+SKIPPED_POST_TYPES = {"postpone", "suggest", "reply", "post_ads"}
 
 
 @dataclass
@@ -78,14 +80,18 @@ class Scanner:
         if self.vk is None:
             log.warning("VK-токен не задан — сканирование отключено")
             return TickStats()
-        await self.resolve_pending(limit=100)
         now = now_utc()
         stats = TickStats()
         active = schedule.active_window(now, self.windows, self.tz)
+        run = None
+        if active is not None:
+            run = await repo.get_run_by_key(self.db, schedule.run_key_for(active[0], active[1]))
+        if run is None:
+            # Разрешаем адреса только между запусками, чтобы порядок сообществ внутри окна не менялся.
+            await self.resolve_pending(limit=100)
         if active is not None:
             window, start, end = active
             run_key = schedule.run_key_for(window, start)
-            run = await repo.get_run_by_key(self.db, run_key)
             targets = await repo.list_scan_targets(self.db, self.settings.monitor_scope)
             if run is None:
                 run = await repo.create_run(
@@ -124,9 +130,19 @@ class Scanner:
             await self._process_slice(run, targets, run.next_index, upto, stats)
             if upto >= total:
                 await repo.finish_run(self.db, run.run_id)
-        if stats.new_candidate_ids and self._on_new_candidates is not None:
-            await self._on_new_candidates(stats.new_candidate_ids)
+        if stats.new_candidate_ids:
+            await self._notify_new(stats.new_candidate_ids)
         return stats
+
+    async def _notify_new(self, candidate_ids: list[int]) -> None:
+        if self._on_new_candidates is None:
+            return
+        try:
+            await self._on_new_candidates(candidate_ids)
+        except (
+            Exception
+        ):  # сбой доставки не должен ломать сканирование; недоставленное уйдёт на следующем тике
+            log.exception("Ошибка мгновенной доставки")
 
     async def full_scan(
         self, progress: Callable[[int, int, TickStats], Awaitable[None]] | None = None
@@ -148,8 +164,8 @@ class Scanner:
                 if progress is not None:
                     await progress(min(len(targets), start + step), len(targets), stats)
             await repo.finish_run(self.db, run.run_id)
-            if stats.new_candidate_ids and self._on_new_candidates is not None:
-                await self._on_new_candidates(stats.new_candidate_ids)
+            if stats.new_candidate_ids:
+                await self._notify_new(stats.new_candidate_ids)
             return stats
 
     # ------------------------------------------------------------ resolving
@@ -221,12 +237,15 @@ class Scanner:
         )
         cutoff = now_utc() - timedelta(hours=self.settings.lookback_hours)
         new_posts: list[tuple[repo.ScanTarget, VkPost]] = []
+        slice_fetched = 0
+        slice_errors = 0
         for owner_id, target in by_owner.items():
             result = results.get(owner_id)
             if result is None:
                 continue
             if result.error is not None:
                 stats.errors += 1
+                slice_errors += 1
                 await repo.record_cursor_error(self.db, target.community_key, str(result.error))
                 if result.error.is_permanent and target.consecutive_errors + 1 >= MAX_PERMANENT_ERRORS:
                     await self.db.execute(
@@ -238,13 +257,14 @@ class Scanner:
                     log.error("VK: ошибка авторизации (%s). Проверьте VK_ACCESS_TOKEN.", result.error)
                 continue
             stats.posts_fetched += len(result.posts)
+            slice_fetched += len(result.posts)
             newest_id = max((p.post_id for p in result.posts), default=None)
             newest_date = max((p.date for p in result.posts), default=None)
             await repo.record_cursor_success(
                 self.db, target.community_key, newest_id, to_iso(newest_date) if newest_date else None
             )
             for post in result.posts:
-                if post.date < cutoff or post.marked_as_ads or post.post_type not in ("post", "copy"):
+                if post.date < cutoff or post.marked_as_ads or post.post_type in SKIPPED_POST_TYPES:
                     continue
                 if target.last_post_id is not None and post.post_id <= target.last_post_id:
                     # Уже видели этот пост (или более новые) — но всё же проверим наличие в БД
@@ -272,10 +292,10 @@ class Scanner:
             self.db,
             run.run_id,
             next_index=end,
-            posts_fetched=stats.posts_fetched,
+            posts_fetched=slice_fetched,
             posts_new=len(new_posts),
             achievements_found=found,
-            errors=0,
+            errors=slice_errors,
         )
         run.next_index = end
 
@@ -365,8 +385,8 @@ class Scanner:
             pending.append((target, post))
         stats = TickStats()
         found = await self._classify_new(pending, stats)
-        if stats.new_candidate_ids and self._on_new_candidates is not None:
-            await self._on_new_candidates(stats.new_candidate_ids)
+        if stats.new_candidate_ids:
+            await self._notify_new(stats.new_candidate_ids)
         return found
 
 

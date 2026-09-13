@@ -92,6 +92,23 @@ async def test_instant_delivery_only_instant_mode(db, settings: Settings):
     sent = await notifier.deliver_instant([cid])
     assert sent == 1 and bot.sent[0][0] == 2
     assert await notifier.deliver_instant([cid]) == 0  # без дублей
+    assert await notifier.deliver_instant() == 0
+
+
+async def test_digest_reschedules_even_if_send_fails(db, settings: Settings):
+    class BrokenBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            raise RuntimeError("network down")
+
+    notifier = Notifier(BrokenBot(), db, settings)  # type: ignore[arg-type]
+    sub, _ = await repo.upsert_subscriber(db, 3, None, None, "13:00", "Europe/Moscow")
+    await repo.update_subscriber(db, 3, next_digest_at="2000-01-01T00:00:00+00:00")
+    await _candidate(db, -9, 1, ["ru21-mo-kanash"])
+    total = await notifier.dispatch_due_digests()
+    assert total == 0
+    sub = await repo.get_subscriber(db, 3)
+    assert from_iso(sub.next_digest_at) > now_utc()
+    assert await db.scalar("SELECT COUNT(*) FROM deliveries") == 0  # ничего не помечено доставленным
 
 
 async def test_list_format_splits_long_digest(db, settings: Settings):

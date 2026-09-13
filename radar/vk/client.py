@@ -111,14 +111,14 @@ class VkClient:
     async def call(self, method: str, **params: Any) -> Any:
         """Вызов метода API с ограничением частоты и повторами при временных ошибках."""
         payload = {k: v for k, v in params.items() if v is not None}
-        payload["access_token"] = self._token
         payload["v"] = self._version
+        headers = {"Authorization": f"Bearer {self._token}"}  # рекомендованный способ передачи ключа (2026)
         attempt = 0
         while True:
             attempt += 1
             await self._limiter.wait()
             try:
-                resp = await self._http.post(self._api_base + method, data=payload)
+                resp = await self._http.post(self._api_base + method, data=payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
             except (httpx.HTTPError, ValueError) as exc:
@@ -260,6 +260,21 @@ class VkClient:
                 )
             )
         return matched
+
+    async def check_token(self, probe_owner_id: int = -1) -> dict[str, Any]:
+        """Диагностика ключа: какие методы доступны. Возвращает словарь method -> 'ok' | текст ошибки."""
+        report: dict[str, Any] = {}
+        for method, params in (
+            ("groups.getById", {"group_ids": str(-probe_owner_id), "fields": "is_closed,wall"}),
+            ("wall.get", {"owner_id": probe_owner_id, "count": 1, "filter": "owner"}),
+            ("execute", {"code": "return API.users.get({});"}),
+        ):
+            try:
+                await self.call(method, **params)
+                report[method] = "ok"
+            except VkApiError as exc:
+                report[method] = f"ошибка {exc.code}: {exc.message}"
+        return report
 
     async def resolve_screen_name(self, screen_name: str) -> GroupInfo | None:
         data = await self.call("utils.resolveScreenName", screen_name=screen_name)
