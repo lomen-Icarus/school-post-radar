@@ -112,6 +112,19 @@ async def update_subscriber(db: Database, chat_id: int, **fields: Any) -> None:
     await db.commit()
 
 
+async def advance_digest_schedule(
+    db: Database, chat_id: int, expected_next: str | None, sent_at: datetime, next_at: datetime
+) -> bool:
+    """Сдвинуть расписание после дайджеста, только если пользователь не поменял его во время отправки."""
+    cur = await db.execute(
+        "UPDATE subscribers SET last_digest_at = ?, next_digest_at = ?, updated_at = ? "
+        "WHERE chat_id = ? AND next_digest_at IS ?",
+        (to_iso(sent_at), to_iso(next_at), to_iso(now_utc()), chat_id, expected_next),
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
 async def touch_subscriber(db: Database, chat_id: int) -> None:
     await db.execute(
         "UPDATE subscribers SET last_seen_at = ? WHERE chat_id = ?", (to_iso(now_utc()), chat_id)
@@ -263,9 +276,22 @@ async def list_scan_targets(db: Database, monitor_scope: str = "all") -> list[Sc
         ORDER BY u.name
         """
     )
+    # Свёртка цепочек дубликатов: связи любого дубликата приписываем каноническому сообществу.
+    dup_rows = await db.fetchall(
+        "SELECT community_key, duplicate_of FROM communities WHERE duplicate_of IS NOT NULL"
+    )
+    duplicate_of = {r["community_key"]: r["duplicate_of"] for r in dup_rows}
+
+    def canonical(key: str) -> str:
+        seen: set[str] = set()
+        while key in duplicate_of and key not in seen:
+            seen.add(key)
+            key = duplicate_of[key]
+        return key
+
     by_key: dict[str, list[dict[str, Any]]] = {}
     for link in links:
-        by_key.setdefault(link["community_key"], []).append(link)
+        by_key.setdefault(canonical(link["community_key"]), []).append(link)
     targets: list[ScanTarget] = []
     for r in communities:
         linked = by_key.get(r["community_key"])
@@ -308,10 +334,32 @@ async def list_unresolved_communities(db: Database, limit: int = 100) -> list[di
 
 
 async def community_key_by_group_id(db: Database, group_id: int) -> str | None:
+    """Каноническое (не являющееся дубликатом) сообщество с таким числовым id."""
     return await db.scalar(
-        "SELECT community_key FROM communities WHERE group_id = ? OR resolved_group_id = ? LIMIT 1",
+        "SELECT community_key FROM communities "
+        "WHERE (group_id = ? OR resolved_group_id = ?) AND duplicate_of IS NULL "
+        "ORDER BY (group_id IS NULL), community_key LIMIT 1",
         (group_id, group_id),
     )
+
+
+async def repair_duplicate_chains(db: Database) -> int:
+    """Свернуть цепочки duplicate_of (A -> B -> C) до канонического сообщества. Возвращает число правок."""
+    total = 0
+    for _ in range(10):
+        cur = await db.execute(
+            """
+            UPDATE communities
+            SET duplicate_of = (SELECT d.duplicate_of FROM communities d WHERE d.community_key = communities.duplicate_of)
+            WHERE duplicate_of IN (SELECT community_key FROM communities WHERE duplicate_of IS NOT NULL)
+            """
+        )
+        if cur.rowcount <= 0:
+            break
+        total += cur.rowcount
+    if total:
+        await db.commit()
+    return total
 
 
 async def mark_community_resolved(
@@ -397,18 +445,23 @@ async def record_cursor_success(
     )
 
 
-async def record_cursor_error(db: Database, community_key: str, error: str) -> None:
+async def record_cursor_error(
+    db: Database, community_key: str, error: str, *, permanent: bool = True
+) -> None:
+    """Записать ошибку опроса. Счётчик consecutive_errors считает только постоянные ошибки (закрыто/удалено):
+    сетевые сбои и лимиты VK его не трогают, чтобы одна ошибка 15 после двух сбоев сети не отключала сообщество."""
     now = to_iso(now_utc())
+    increment = 1 if permanent else 0
     await db.execute(
         """
         INSERT INTO community_cursors (community_key, last_checked_at, last_error, consecutive_errors)
-        VALUES (?, ?, ?, 1)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(community_key) DO UPDATE SET
             last_checked_at = excluded.last_checked_at,
             last_error = excluded.last_error,
-            consecutive_errors = community_cursors.consecutive_errors + 1
+            consecutive_errors = community_cursors.consecutive_errors + ?
         """,
-        (community_key, now, error[:500]),
+        (community_key, now, error[:500], increment, increment),
     )
 
 
@@ -494,14 +547,17 @@ async def list_unclassified_posts(db: Database, since: datetime, limit: int = 20
 
 
 async def purge_old_posts(db: Database, older_than: datetime) -> int:
+    """Удалить кандидатов, посты и записи о доставках старше порога (они вне любого окна доставки)."""
     cutoff = to_iso(older_than)
-    await db.execute(
-        "DELETE FROM achievement_candidates WHERE published_at < ? AND review_status IN ('sent', 'rejected', 'done')",
-        (cutoff,),
-    )
+    await db.execute("DELETE FROM achievement_candidates WHERE published_at < ?", (cutoff,))
     cur = await db.execute(
         "DELETE FROM posts WHERE published_at < ? AND NOT EXISTS ("
         "SELECT 1 FROM achievement_candidates a WHERE a.owner_id = posts.owner_id AND a.post_id = posts.post_id)",
+        (cutoff,),
+    )
+    await db.execute(
+        "DELETE FROM deliveries WHERE sent_at < ? OR NOT EXISTS ("
+        "SELECT 1 FROM posts p WHERE p.owner_id = deliveries.owner_id AND p.post_id = deliveries.post_id)",
         (cutoff,),
     )
     await db.commit()
@@ -649,15 +705,17 @@ async def list_pending_for_chat(
     min_confidence: float,
     limit: int = 2000,
 ) -> list[Candidate]:
-    """Кандидаты, ещё не доставленные в чат, не отклонённые, опубликованные после `since`.
+    """Кандидаты, ещё не доставленные в чат, не отклонённые, найденные (created_at) после `since`.
 
+    Окно считается от момента обнаружения, а не публикации: пост, найденный с опозданием
+    (после простоя бота), всё равно попадёт в ближайший дайджест.
     Фильтр по территориям применяется в Python (municipality_ids хранится как JSON-список).
     """
     rows = await db.fetchall(
         _CANDIDATE_SELECT
         + """
         WHERE a.review_status <> 'rejected'
-          AND a.published_at >= ?
+          AND a.created_at >= ?
           AND COALESCE(a.confidence, 0) >= ?
           AND NOT EXISTS (SELECT 1 FROM deliveries d
                           WHERE d.chat_id = ? AND d.owner_id = a.owner_id AND d.post_id = a.post_id)

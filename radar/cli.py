@@ -96,14 +96,16 @@ async def _check_token(settings: Settings) -> None:
         use_execute=True,
     )
     try:
-        report = await vk.check_token(probe_owner_id=-10812563)  # МБОУ «Гимназия № 6», Новочебоксарск
+        # Гимназия №6 (Новочебоксарск), СОШ №9 (Алатырь), Гимназия №5 (Чебоксары)
+        report = await vk.check_token(probe_owner_ids=[-10812563, -150859146, -180216915])
     finally:
         await vk.close()
     for method, status in report.items():
         print(f"{method:16} {status}")
-    if report.get("wall.get") != "ok":
+    if not report.get("wall.get", "").startswith("ok"):
         print(
-            "\nwall.get недоступен этому ключу — бот не сможет читать ленты. Нужен сервисный ключ приложения или пользовательский токен."
+            "\nwall.get недоступен этому ключу — бот не сможет читать ленты. "
+            "Нужен сервисный ключ приложения или пользовательский токен."
         )
         sys.exit(1)
     if report.get("execute") == "ok":

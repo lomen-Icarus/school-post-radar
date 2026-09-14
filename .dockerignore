@@ -1,0 +1,14 @@
+.git/
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+data/radar.sqlite*
+docs/
+tests/
+deploy/

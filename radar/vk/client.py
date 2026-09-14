@@ -173,10 +173,20 @@ class VkClient:
             try:
                 batch = await self._wall_get_batch(chunk, count)
             except VkApiError as exc:
-                if exc.is_auth or exc.code in (12, 13):
-                    # 12/13 — ошибки компиляции/выполнения VKScript; 28 — метод недоступен токену
+                if exc.is_auth or exc.code == 12:
+                    # 12 — ошибка компиляции VKScript; 28/5 — метод недоступен токену: execute больше не пробуем
                     log.warning("execute недоступен (%s), переходим на одиночные вызовы", exc)
                     self.execute_supported = False
+                    for oid in chunk:
+                        results[oid] = await self.wall_get(oid, count)
+                    continue
+                if exc.code == 13:
+                    # 13 — ошибка выполнения, в том числе ответ больше 5 МБ: разбираем только этот пакет по одному
+                    log.warning(
+                        "execute: ошибка выполнения (%s) — пакет из %d сообществ читаем по одному",
+                        exc,
+                        len(chunk),
+                    )
                     for oid in chunk:
                         results[oid] = await self.wall_get(oid, count)
                     continue
@@ -261,19 +271,39 @@ class VkClient:
             )
         return matched
 
-    async def check_token(self, probe_owner_id: int = -1) -> dict[str, Any]:
-        """Диагностика ключа: какие методы доступны. Возвращает словарь method -> 'ok' | текст ошибки."""
-        report: dict[str, Any] = {}
-        for method, params in (
-            ("groups.getById", {"group_ids": str(-probe_owner_id), "fields": "is_closed,wall"}),
-            ("wall.get", {"owner_id": probe_owner_id, "count": 1, "filter": "owner"}),
-            ("execute", {"code": "return API.users.get({});"}),
-        ):
-            try:
-                await self.call(method, **params)
-                report[method] = "ok"
-            except VkApiError as exc:
-                report[method] = f"ошибка {exc.code}: {exc.message}"
+    async def check_token(self, probe_owner_ids: list[int] | None = None) -> dict[str, str]:
+        """Диагностика ключа: какие методы доступны. Возвращает словарь method -> 'ok' | 'ok (...)' | 'ошибка ...'.
+
+        Ошибки уровня сообщества (закрыто, удалено, заблокировано) не считаются проблемой ключа:
+        проверяется следующее сообщество из списка.
+        """
+        probes = probe_owner_ids or [-1]
+        report: dict[str, str] = {}
+        for method in ("groups.getById", "wall.get"):
+            for owner_id in probes:
+                params = (
+                    {"group_ids": str(-owner_id), "fields": "is_closed,wall"}
+                    if method == "groups.getById"
+                    else {"owner_id": owner_id, "count": 1, "filter": "owner"}
+                )
+                try:
+                    await self.call(method, **params)
+                    report[method] = "ok"
+                    break
+                except VkApiError as exc:
+                    if exc.is_auth or exc.code in (7, 27, 1116, 1117):
+                        report[method] = f"ошибка {exc.code}: {exc.message}"
+                        break
+                    if exc.is_permanent:  # свойство пробного сообщества, а не ключа
+                        report[method] = f"ok (пробное сообщество {owner_id} недоступно: {exc.code})"
+                        continue
+                    report[method] = f"ошибка {exc.code}: {exc.message}"
+                    break
+        try:
+            await self.call("execute", code="return API.users.get({});")
+            report["execute"] = "ok"
+        except VkApiError as exc:
+            report["execute"] = f"ошибка {exc.code}: {exc.message}"
         return report
 
     async def resolve_screen_name(self, screen_name: str) -> GroupInfo | None:

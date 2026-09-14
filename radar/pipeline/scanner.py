@@ -62,6 +62,14 @@ class Scanner:
         self.last_error: str | None = None
 
     # ------------------------------------------------------------------ tick
+    @property
+    def busy(self) -> bool:
+        return self._lock.locked()
+
+    async def wait_idle(self) -> None:
+        async with self._lock:
+            pass
+
     async def tick(self) -> TickStats | None:
         """Один шаг планировщика: обработать долю сообществ, положенную к текущему моменту окна."""
         if self._lock.locked():
@@ -255,7 +263,9 @@ class Scanner:
             if result.error is not None:
                 stats.errors += 1
                 slice_errors += 1
-                await repo.record_cursor_error(self.db, target.community_key, str(result.error))
+                await repo.record_cursor_error(
+                    self.db, target.community_key, str(result.error), permanent=result.error.is_permanent
+                )
                 if result.error.is_permanent and target.consecutive_errors + 1 >= MAX_PERMANENT_ERRORS:
                     await self.db.execute(
                         "UPDATE communities SET scan_enabled = 0 WHERE community_key = ?",

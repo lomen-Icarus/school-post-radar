@@ -17,7 +17,11 @@ log = logging.getLogger(__name__)
 async def edit_or_send(
     event: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup | None
 ) -> None:
-    """Редактировать сообщение с меню (для колбэков) или отправить новое (для команд)."""
+    """Редактировать сообщение с меню (для колбэков) или отправить новое (для команд).
+
+    Если сообщение с меню недоступно (слишком старое или удалено), отправляем новое — иначе
+    нажатие кнопки выглядело бы как «ничего не произошло».
+    """
     if isinstance(event, CallbackQuery):
         message = event.message
         if isinstance(message, Message):
@@ -29,6 +33,9 @@ async def edit_or_send(
                     return
                 log.debug("edit_text не удался (%s), отправляем новое", exc)
             await message.answer(text, reply_markup=markup)
+            return
+        chat_id = message.chat.id if message is not None else event.from_user.id
+        await event.bot.send_message(chat_id, text, reply_markup=markup)
         return
     await event.answer(text, reply_markup=markup)
 

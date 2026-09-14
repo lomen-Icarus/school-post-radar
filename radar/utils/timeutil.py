@@ -38,12 +38,16 @@ def local_now(tz_name: str) -> datetime:
 
 def parse_hhmm(raw: str) -> time:
     raw = raw.strip().replace(".", ":").replace("-", ":")
+    shown = raw[:20] + ("…" if len(raw) > 20 else "")  # в сообщение об ошибке не тащим весь ввод
     parts = raw.split(":")
     if len(parts) != 2:
-        raise ValueError(f"Неверное время: {raw!r} (ожидается ЧЧ:ММ)")
-    hour, minute = int(parts[0]), int(parts[1])
+        raise ValueError(f"Неверное время: {shown!r} (ожидается ЧЧ:ММ)")
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"Неверное время: {shown!r} (ожидается ЧЧ:ММ)") from None
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError(f"Неверное время: {raw!r}")
+        raise ValueError(f"Неверное время: {shown!r}")
     return time(hour=hour, minute=minute)
 
 

@@ -83,7 +83,7 @@ async def test_check_token_report(fake_vk):
     fake_vk.walls[-10812563] = [make_post(-10812563, 1, "a")]
     fake_vk.groups["10812563"] = {"id": 10812563, "screen_name": "club10812563", "name": "Гимназия"}
     client = VkClient("t", rps=1000, http=httpx.AsyncClient(transport=fake_vk.transport()), use_execute=True)
-    report = await client.check_token(-10812563)
+    report = await client.check_token([-10812563])
     assert (
         report["wall.get"] == "ok"
         and report["groups.getById"] == "ok"

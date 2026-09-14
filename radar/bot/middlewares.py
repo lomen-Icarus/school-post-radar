@@ -56,13 +56,16 @@ class SubscriberMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         chat = data.get("event_chat")
-        if user is None or chat is None or chat.type != "private":
-            return await handler(event, data)
+        if user is None or chat is None or chat.type not in ("private", "group", "supergroup"):
+            return None  # каналы и прочее не обслуживаем
+        # В группе подписчиком становится сам чат (отрицательный id), подписью служит его название.
+        username = user.username if chat.type == "private" else None
+        display_name = user.first_name if chat.type == "private" else (chat.title or str(chat.id))
         sub, created = await repo.upsert_subscriber(
             self.db,
             chat.id,
-            user.username,
-            user.first_name,
+            username,
+            display_name,
             self.settings.default_digest_times,
             self.settings.timezone,
         )

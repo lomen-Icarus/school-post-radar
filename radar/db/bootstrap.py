@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
 from radar.db.connection import Database
 from radar.db.migrations import apply_migrations
-from radar.registry.municipalities import MUNICIPALITIES, municipality_for_area_source
+from radar.registry.municipalities import BY_ID, MUNICIPALITIES, municipality_for_area_source
 from radar.utils.timeutil import now_utc, to_iso
 
 log = logging.getLogger(__name__)
+
+SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def remove_sidecars(db_path: Path) -> None:
+    """Удалить хвосты WAL/журнала от прежней базы: иначе SQLite «накатит» их на свежую копию реестра."""
+    for suffix in SIDECAR_SUFFIXES:
+        Path(str(db_path) + suffix).unlink(missing_ok=True)
 
 
 def ensure_database_file(db_path: Path, seed_path: Path) -> bool:
@@ -19,7 +28,10 @@ def ensure_database_file(db_path: Path, seed_path: Path) -> bool:
     if not seed_path.exists():
         raise FileNotFoundError(f"Нет ни рабочей базы {db_path}, ни заготовки реестра {seed_path}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(seed_path, db_path)
+    remove_sidecars(db_path)
+    tmp_path = db_path.with_name(db_path.name + ".tmp")
+    shutil.copyfile(seed_path, tmp_path)
+    os.replace(tmp_path, db_path)  # атомарно: недокопированный файл никогда не станет «существующей базой»
     log.info("Создана рабочая база %s из %s", db_path, seed_path)
     return True
 
@@ -43,8 +55,16 @@ async def seed_municipalities(db: Database) -> None:
 
 
 async def map_units_to_municipalities(db: Database) -> tuple[int, list[str]]:
-    """Проставить units.municipality_id по area_source. Возвращает (обновлено, нераспознанные area_source)."""
-    rows = await db.fetchall("SELECT unit_id, area_source FROM units WHERE municipality_id IS NULL")
+    """Проставить units.municipality_id по area_source. Возвращает (обновлено, нераспознанные area_source).
+
+    Перепривязываются и площадки с чужими идентификаторами территорий (из другой версии реестра).
+    """
+    known = list(BY_ID)
+    placeholders = ",".join("?" for _ in known)
+    rows = await db.fetchall(
+        f"SELECT unit_id, area_source FROM units WHERE municipality_id IS NULL OR municipality_id NOT IN ({placeholders})",
+        known,
+    )
     unknown: set[str] = set()
     updates: list[tuple[str, str]] = []
     for row in rows:
@@ -55,21 +75,41 @@ async def map_units_to_municipalities(db: Database) -> tuple[int, list[str]]:
         updates.append((mid, row["unit_id"]))
     if updates:
         await db.executemany("UPDATE units SET municipality_id = ? WHERE unit_id = ?", updates)
-        await db.commit()
+    # Чужие записи справочника (если заготовка принесла свой список) убираем, когда на них никто не ссылается.
+    await db.execute(
+        f"""
+        DELETE FROM municipalities
+        WHERE municipality_id NOT IN ({placeholders})
+          AND NOT EXISTS (SELECT 1 FROM units u WHERE u.municipality_id = municipalities.municipality_id)
+          AND NOT EXISTS (SELECT 1 FROM notification_region_settings s
+                          WHERE s.municipality_id = municipalities.municipality_id)
+        """,
+        known,
+    )
+    await db.commit()
     if unknown:
         log.warning("Не распознаны районы: %s", sorted(unknown))
     return len(updates), sorted(unknown)
 
 
 async def initialize_database(db_path: Path, seed_path: Path) -> Database:
-    """Полная инициализация: файл -> миграции -> справочники."""
+    """Полная инициализация: файл -> миграции -> справочники. При ошибке соединение закрывается."""
     ensure_database_file(db_path, seed_path)
     db = await Database(db_path).connect()
-    applied = await apply_migrations(db)
-    if applied:
-        log.info("Применены миграции: %s", applied)
-    await seed_municipalities(db)
-    updated, _unknown = await map_units_to_municipalities(db)
-    if updated:
-        log.info("Сопоставлено площадок с округами: %d", updated)
+    try:
+        applied = await apply_migrations(db)
+        if applied:
+            log.info("Применены миграции: %s", applied)
+        await seed_municipalities(db)
+        updated, _unknown = await map_units_to_municipalities(db)
+        if updated:
+            log.info("Сопоставлено площадок с округами: %d", updated)
+        from radar.db import repo  # локальный импорт: repo зависит от connection, а не от bootstrap
+
+        repaired = await repo.repair_duplicate_chains(db)
+        if repaired:
+            log.info("Исправлены цепочки дубликатов сообществ: %d", repaired)
+    except BaseException:
+        await db.close()  # иначе поток aiosqlite не даст процессу завершиться
+        raise
     return db

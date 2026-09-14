@@ -17,7 +17,7 @@ from radar.config import Settings
 from radar.db import repo
 from radar.db.connection import Database
 from radar.pipeline.schedule import next_digest_after_send
-from radar.utils.timeutil import humanize_local, now_utc, to_iso
+from radar.utils.timeutil import humanize_local, now_utc
 
 log = logging.getLogger(__name__)
 
@@ -29,15 +29,23 @@ class Notifier:
         self.settings = settings
         self._send_lock = asyncio.Lock()
 
+    @property
+    def busy(self) -> bool:
+        return self._send_lock.locked()
+
+    async def wait_idle(self) -> None:
+        async with self._send_lock:
+            pass
+
     # ------------------------------------------------------------ helpers
     async def _send(self, chat_id: int, text: str, **kwargs: Any) -> int | None:
         """Отправить сообщение с обработкой лимитов Telegram. None — если чат недоступен."""
         for attempt in range(3):
+            await asyncio.sleep(0.05)  # пауза ДО отправки: после send_message сразу фиксируем доставку
             try:
                 msg = await self.bot.send_message(
                     chat_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True), **kwargs
                 )
-                await asyncio.sleep(0.05)
                 return msg.message_id
             except TelegramRetryAfter as exc:
                 log.warning("Telegram: flood control, ждём %sс", exc.retry_after)
@@ -106,15 +114,16 @@ class Notifier:
         Расписание сдвигается всегда (кроме ручного вызова), даже если отправка не удалась:
         недоставленные посты останутся в очереди и уйдут в следующий раз.
         """
+        expected_next = sub.next_digest_at
         try:
             return await self._deliver_digest_inner(sub, manual=manual)
         finally:
             if not manual:
+                # Настройки перечитываем: пользователь мог сменить расписание, пока шла отправка.
+                fresh = await repo.get_subscriber(self.db, sub.chat_id) or sub
                 sent_at = now_utc()
-                nxt = next_digest_after_send(sent_at, sub.digest_times, sub.interval_days, sub.timezone)
-                await repo.update_subscriber(
-                    self.db, sub.chat_id, last_digest_at=to_iso(sent_at), next_digest_at=to_iso(nxt)
-                )
+                nxt = next_digest_after_send(sent_at, fresh.digest_times, fresh.interval_days, fresh.timezone)
+                await repo.advance_digest_schedule(self.db, sub.chat_id, expected_next, sent_at, nxt)
 
     async def _deliver_digest_inner(self, sub: repo.Subscriber, *, manual: bool) -> int:
         channel = "manual" if manual else "digest"

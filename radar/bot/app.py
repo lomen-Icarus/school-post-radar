@@ -56,12 +56,12 @@ def create_dispatcher(settings: Settings, db: Database, **deps: object) -> Dispa
     dp.callback_query.outer_middleware(access)
     dp.message.middleware(subscriber_mw)
     dp.callback_query.middleware(subscriber_mw)
-    dp.include_router(start.router)
-    dp.include_router(settings_handlers.router)
-    dp.include_router(regions.router)
-    dp.include_router(status.router)
-    dp.include_router(feedback.router)
-    dp.include_router(admin.setup(settings))
+    dp.include_router(start.build_router())
+    dp.include_router(settings_handlers.build_router())
+    dp.include_router(regions.build_router())
+    dp.include_router(status.build_router())
+    dp.include_router(feedback.build_router())
+    dp.include_router(admin.build_router(settings))
     return dp
 
 

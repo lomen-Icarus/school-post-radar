@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS municipalities (
     source_id         TEXT,
     checked_at        TEXT
 );
+-- Если заготовка реестра принесла свою таблицу municipalities без этих колонок — добавляем (runner пропустит дубли).
+ALTER TABLE municipalities ADD COLUMN short_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE municipalities ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE units ADD COLUMN municipality_id TEXT REFERENCES municipalities(municipality_id);
 CREATE INDEX IF NOT EXISTS units_municipality_idx ON units(municipality_id);
@@ -121,7 +124,8 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 );
 
 -- Эффективные настройки территорий профиля: исключение либо общий режим профиля.
-CREATE VIEW IF NOT EXISTS v_notification_regions AS
+DROP VIEW IF EXISTS v_notification_regions;
+CREATE VIEW v_notification_regions AS
 SELECT p.profile_id,
        m.municipality_id,
        m.name,
@@ -136,22 +140,38 @@ LEFT JOIN notification_region_settings s
        ON s.profile_id = p.profile_id AND s.municipality_id = m.municipality_id;
 
 -- Сообщества, доступные профилю с учётом включённых территорий (только подтверждённые связи).
-CREATE VIEW IF NOT EXISTS v_notification_targets AS
-SELECT r.profile_id,
-       c.community_key,
-       c.canonical_url,
-       c.screen_name,
-       COALESCE(c.group_id, c.resolved_group_id) AS group_id,
-       group_concat(DISTINCT u.unit_id)          AS unit_ids,
-       group_concat(DISTINCT u.name)             AS school_names,
-       group_concat(DISTINCT u.municipality_id)  AS municipality_ids
-FROM communities c
-JOIN unit_communities uc ON uc.community_key = c.community_key
-JOIN units u ON u.unit_id = uc.unit_id
-JOIN v_notification_regions r ON r.municipality_id = u.municipality_id AND r.enabled = 1
-WHERE u.scope = 'school'
-  AND uc.monitor_enabled = 1
-  AND uc.official_status = 'official_source_link'
-  AND c.scan_enabled = 1
-  AND c.duplicate_of IS NULL
-GROUP BY r.profile_id, c.community_key;
+-- Формат по контракту реестра: unit_ids и school_names через '; ', municipality_ids и municipality_names через ','.
+DROP VIEW IF EXISTS v_notification_targets;
+CREATE VIEW v_notification_targets AS
+SELECT profile_id,
+       community_key,
+       canonical_url,
+       screen_name,
+       group_id,
+       group_concat(unit_id, '; ')           AS unit_ids,
+       group_concat(school_name, '; ')       AS school_names,
+       group_concat(municipality_id, ',')    AS municipality_ids,
+       group_concat(municipality_name, ',')  AS municipality_names
+FROM (
+    SELECT DISTINCT r.profile_id,
+           c.community_key,
+           c.canonical_url,
+           c.screen_name,
+           COALESCE(c.group_id, c.resolved_group_id) AS group_id,
+           u.unit_id,
+           u.name AS school_name,
+           u.municipality_id,
+           m.name AS municipality_name
+    FROM communities c
+    JOIN unit_communities uc ON uc.community_key = c.community_key
+    JOIN units u ON u.unit_id = uc.unit_id
+    JOIN municipalities m ON m.municipality_id = u.municipality_id
+    JOIN v_notification_regions r ON r.municipality_id = u.municipality_id AND r.enabled = 1
+    WHERE u.scope = 'school'
+      AND uc.monitor_enabled = 1
+      AND uc.official_status = 'official_source_link'
+      AND c.scan_enabled = 1
+      AND c.duplicate_of IS NULL
+    ORDER BY r.profile_id, c.community_key, u.unit_id
+)
+GROUP BY profile_id, community_key;

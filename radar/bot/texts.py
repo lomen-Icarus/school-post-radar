@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
+from radar.config import Settings
 from radar.db.repo import Subscriber
 from radar.utils.timeutil import from_iso, humanize_local
 
@@ -20,7 +21,11 @@ KIND_LABELS = {
 }
 
 
-def welcome(first_name: str | None, created: bool) -> str:
+def _tz_label(tz_name: str) -> str:
+    return "МСК" if tz_name == "Europe/Moscow" else tz_name
+
+
+def welcome(first_name: str | None, created: bool, sub: Subscriber) -> str:
     name = escape(first_name or "коллега")
     intro = (
         f"Привет, {name}! Я <b>Радар школьных достижений</b>.\n\n"
@@ -29,16 +34,24 @@ def welcome(first_name: str | None, created: bool) -> str:
         "успел поздравить их под постом.\n\n"
     )
     if created:
-        intro += "По умолчанию: дайджест в <b>13:00</b> и <b>21:00</b> (МСК), все 23 территории включены.\n\n"
+        times = escape(sub.digest_times.replace(",", ", "))
+        intro += (
+            f"По умолчанию: дайджест в <b>{times}</b> ({escape(_tz_label(sub.timezone))}), "
+            "все 23 территории включены.\n\n"
+        )
     return intro + "Ниже — настройки. Всё меняется кнопками, ничего вводить не нужно."
 
 
-def help_text() -> str:
+def help_text(settings: Settings, communities_total: int) -> str:
+    windows = escape(settings.scan_windows.replace(",", " и ").replace("-", "–"))
+    scope = (
+        "все найденные сообщества" if settings.monitor_scope == "all" else "только подтверждённые сообщества"
+    )
     return (
         "<b>Как это работает</b>\n"
-        "• С 08:00 до 12:45 и с 17:00 до 20:45 (МСК) бот по очереди обходит ~365 сообществ школ, "
-        "чтобы нагрузка была ровной.\n"
-        "• Новые посты за последние 48 часов проверяются на «достижение ученика» "
+        f"• В окна {windows} ({escape(_tz_label(settings.timezone))}) бот по очереди обходит "
+        f"{communities_total} сообществ школ ({scope}), чтобы нагрузка была ровной.\n"
+        f"• Новые посты за последние {settings.lookback_hours} ч проверяются на «достижение ученика» "
         "(ключевые слова + модель Claude).\n"
         "• Найденное приходит пачкой в выбранное время или сразу — как настроите.\n\n"
         "<b>Команды</b>\n"
@@ -46,6 +59,7 @@ def help_text() -> str:
         "/settings — настройки\n"
         "/regions — территории\n"
         "/status — что происходит сейчас\n"
+        "/digest — прислать накопленное сейчас\n"
         "/pause и /resume — пауза и возобновление\n"
         "/tz Europe/Moscow — часовой пояс расписания\n\n"
         "В каждой карточке есть кнопки «Не достижение» и «Поздравили» — так вы отмечаете обработанное, "
@@ -55,7 +69,7 @@ def help_text() -> str:
 
 def settings_overview(sub: Subscriber, enabled_regions: int, total_regions: int) -> str:
     mode = MODE_LABELS.get(sub.mode, sub.mode)
-    times = escape(sub.digest_times)
+    times = escape(sub.digest_times.replace(",", ", "))
     interval = "каждый день" if sub.interval_days == 1 else f"раз в {sub.interval_days} дн."
     nxt = humanize_local(from_iso(sub.next_digest_at), sub.timezone) if sub.mode == "digest" else "—"
     state = "▶️ активен" if sub.is_active else "⏸ на паузе"
@@ -87,7 +101,7 @@ def schedule_screen(sub: Subscriber) -> str:
     nxt = humanize_local(from_iso(sub.next_digest_at), sub.timezone)
     return (
         "<b>🕐 Расписание дайджестов</b>\n\n"
-        f"Время: <b>{escape(sub.digest_times)}</b> ({escape(sub.timezone)})\n"
+        f"Время: <b>{escape(sub.digest_times.replace(',', ', '))}</b> ({escape(sub.timezone)})\n"
         f"Частота: <b>{interval}</b>\n"
         f"Следующий: {nxt}\n\n"
         "Выберите готовый вариант или задайте своё время."
@@ -109,4 +123,7 @@ def ask_custom_times() -> str:
 
 
 def ask_timezone() -> str:
-    return "Введите часовой пояс в формате IANA, например <code>Europe/Moscow</code> или <code>Asia/Yekaterinburg</code>."
+    return (
+        "Введите часовой пояс в формате IANA, например <code>Europe/Moscow</code> или "
+        "<code>Asia/Yekaterinburg</code>.\nОтмена — /cancel"
+    )

@@ -18,6 +18,8 @@ from radar.vk.client import VkClient
 
 log = logging.getLogger(__name__)
 
+SHUTDOWN_GRACE_SECONDS = 30
+
 
 def setup_logging(level: str) -> None:
     logging.basicConfig(
@@ -45,22 +47,33 @@ def build_classifier(settings: Settings) -> Classifier:
     )
 
 
+def build_vk_client(settings: Settings) -> VkClient | None:
+    if not settings.vk_enabled:
+        log.warning("VK_ACCESS_TOKEN не задан — опрос сообществ отключён")
+        return None
+    return VkClient(
+        settings.vk_access_token,
+        version=settings.vk_api_version,
+        rps=settings.vk_rps,
+        api_base=settings.vk_api_base,
+        use_execute=settings.vk_use_execute,
+    )
+
+
+async def _wait_idle(scanner: Scanner, notifier: Notifier, grace_seconds: float) -> None:
+    """Дождаться, пока завершатся текущий тик и отправка, чтобы не оборвать доставку между send и записью."""
+    try:
+        async with asyncio.timeout(grace_seconds):
+            await scanner.wait_idle()
+            await notifier.wait_idle()
+    except TimeoutError:
+        log.warning("Фоновые задачи не завершились за %.0f с — останавливаем принудительно", grace_seconds)
+
+
 async def run(settings: Settings) -> None:
     setup_logging(settings.log_level)
     db = await initialize_database(settings.db_path, settings.registry_seed_path)
-    vk = (
-        VkClient(
-            settings.vk_access_token,
-            version=settings.vk_api_version,
-            rps=settings.vk_rps,
-            api_base=settings.vk_api_base,
-            use_execute=settings.vk_use_execute,
-        )
-        if settings.vk_enabled
-        else None
-    )
-    if vk is None:
-        log.warning("VK_ACCESS_TOKEN не задан — опрос сообществ отключён")
+    vk = build_vk_client(settings)
     classifier = build_classifier(settings)
     bot = create_bot(settings)
     notifier = Notifier(bot, db, settings)
@@ -76,27 +89,38 @@ async def run(settings: Settings) -> None:
         except NotImplementedError:  # Windows
             pass
 
-    await setup_bot_commands(bot, settings)
-    scheduler.start()
-    log.info("Бот запущен. Окна сканирования: %s (%s)", settings.scan_windows, settings.timezone)
-    polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+    polling_error: BaseException | None = None
+    polling: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait(
-            {polling, asyncio.create_task(stop_event.wait())}, return_when=asyncio.FIRST_COMPLETED
-        )
+        await setup_bot_commands(bot, settings)
+        scheduler.start()
+        log.info("Бот запущен. Окна сканирования: %s (%s)", settings.scan_windows, settings.timezone)
+        polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+        stopper = asyncio.create_task(stop_event.wait())
+        await asyncio.wait({polling, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        stopper.cancel()
+        if polling.done() and not polling.cancelled():
+            polling_error = polling.exception()
     finally:
-        scheduler.shutdown(wait=False)
-        try:
-            await dp.stop_polling()
-        except RuntimeError:  # polling уже завершился (например, из-за ошибки) — просто убираем задачу
-            pass
-        polling.cancel()
-        try:
-            await polling
-        except (asyncio.CancelledError, Exception):
-            pass
+        if scheduler.running:
+            scheduler.pause()  # новые задачи не стартуют, текущие дорабатывают
+            await _wait_idle(scanner, notifier, SHUTDOWN_GRACE_SECONDS)
+            scheduler.shutdown(wait=False)
+        if polling is not None and not polling.done():
+            try:
+                await dp.stop_polling()
+            except RuntimeError:  # polling уже завершился
+                pass
+            polling.cancel()
+            try:
+                await polling
+            except (asyncio.CancelledError, Exception):
+                pass
         if vk is not None:
             await vk.close()
         await bot.session.close()
         await db.close()
         log.info("Бот остановлен")
+    if polling_error is not None:
+        log.error("Опрос Telegram завершился с ошибкой", exc_info=polling_error)
+        raise polling_error
