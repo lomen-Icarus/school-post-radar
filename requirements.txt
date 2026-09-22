@@ -1,0 +1,10 @@
+# Зависимости для запуска без установки пакета (панели Pterodactyl, простой VPS).
+# Версии совпадают с проверенными в pyproject.toml.
+aiogram==3.31.0
+aiosqlite==0.22.1
+httpx==0.28.1
+anthropic==1.5.0
+pydantic==2.13.1
+pydantic-settings==2.15.0
+APScheduler==3.11.3
+tzdata==2026.2

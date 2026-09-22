@@ -44,6 +44,10 @@ radar resolve          # разрешит 98 коротких адресов В�
 radar run              # запуск бота
 ```
 
+На хостинге, где пакет не установить (панели вроде Pterodactyl), работает тот же набор команд
+через файл `bot.py`: `pip install -r requirements.txt`, затем `python bot.py init-db`
+и `python bot.py run`.
+
 Проверки: `ruff check radar tests && pytest -q`.
 
 ## Что нужно заполнить в `.env`
@@ -168,6 +172,8 @@ data/registry_seed.sqlite   исходный реестр школ (только
 
 ## Развёртывание
 
+- **Панель Pterodactyl** (например `panel.frienworld.space`): сервер с яйцом Python, команда запуска
+  `python bot.py run`, зависимости из `requirements.txt`. Пошагово — в `deploy/pterodactyl.md`.
 - **Docker:** `docker compose up -d --build`; база живёт в томе `radar-data`.
 - **systemd:** пример юнита в `deploy/school-post-radar.service` (каталог `/opt/school-post-radar`,
   пользователь `radar`, `.env` рядом).
