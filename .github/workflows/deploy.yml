@@ -1,8 +1,14 @@
 # CI + автодеплой на сервер Pterodactyl (panel.frienworld.space).
 #
-# Схема: push в ветку деплоя -> ruff + pytest -> перезапуск сервера через Client API панели.
+# Схема: push в main -> ruff + pytest -> перезапуск сервера через Client API панели.
 # При старте сервер сам делает `git pull` и `pip install -r requirements.txt`
 # (переменная AUTO_UPDATE=1 в яйце Python Generic), поэтому код доставляется без SFTP.
+# Логика обращений к панели — deploy/ptero.py.
+#
+# Ручной запуск (Actions -> CI / Deploy -> Run workflow) принимает режим:
+#   deploy    — перезапуск с git pull (как при push);
+#   inspect   — только посмотреть сервер: состояние, переменные Startup, файлы;
+#   bootstrap — прописать переменные Startup и залить код в пустой контейнер (git clone).
 #
 # Настройка репозитория (Settings -> Secrets and variables -> Actions):
 #   secret   PTERODACTYL_API_KEY    — Client API key панели (ptlc_...), Account -> API Credentials
@@ -15,6 +21,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "deploy | inspect | bootstrap"
+        type: choice
+        options: [deploy, inspect, bootstrap]
+        default: deploy
 
 permissions:
   contents: read
@@ -32,7 +44,7 @@ jobs:
       - name: Install
         run: pip install -e '.[dev]'
       - name: Ruff
-        run: ruff check radar tests
+        run: ruff check radar tests deploy
       - name: Pytest
         run: pytest -q
 
@@ -42,7 +54,7 @@ jobs:
       github.event_name != 'pull_request' &&
       github.ref_name == (vars.DEPLOY_BRANCH || 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     # Деплои не идут параллельно; новый push дожидается окончания предыдущего, а не обрывает его.
     concurrency:
       group: deploy-pterodactyl
@@ -52,76 +64,9 @@ jobs:
       PANEL_URL: ${{ vars.PTERODACTYL_PANEL_URL || 'https://panel.frienworld.space' }}
       SERVER_ID: ${{ vars.PTERODACTYL_SERVER_ID || '75511c5e' }}
       API_KEY: ${{ secrets.PTERODACTYL_API_KEY }}
+      DEPLOY_BRANCH: ${{ vars.DEPLOY_BRANCH || 'main' }}
+      MODE: ${{ inputs.mode || 'deploy' }}
     steps:
-      - name: Check secret
-        run: |
-          if [ -z "$API_KEY" ]; then
-            echo "::error::Не задан секрет PTERODACTYL_API_KEY (Client API key панели)"
-            exit 1
-          fi
-
-      - name: Restart server (git pull + pip install on start)
-        run: |
-          set -euo pipefail
-          power() {
-            curl -sS -o /tmp/resp.txt -w '%{http_code}' --max-time 30 --retry 3 --retry-all-errors \
-              -X POST "$PANEL_URL/api/client/servers/$SERVER_ID/power" \
-              -H "Authorization: Bearer $API_KEY" \
-              -H 'Accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -d "{\"signal\":\"$1\"}"
-          }
-          code=$(power restart)
-          echo "restart -> HTTP $code"
-          if [ "$code" = "412" ] || [ "$code" = "409" ]; then
-            # Сервер выключен (или в процессе смены состояния) — просто запускаем.
-            sleep 5
-            code=$(power start)
-            echo "start -> HTTP $code"
-          fi
-          if [ "$code" != "204" ]; then
-            echo "::error::Панель вернула HTTP $code"
-            head -c 2000 /tmp/resp.txt || true
-            exit 1
-          fi
-
-      - name: Wait until running
-        run: |
-          set -euo pipefail
-          # Состояние running панель ставит, когда в консоли появляется строка "done" из настроек яйца
-          # (для бота: «Бот запущен»). Если она не настроена, сервер навсегда остаётся в starting,
-          # поэтому устойчивое starting > 60 с тоже считаем успешным запуском, но с предупреждением.
-          # Сразу после команды restart сервер ещё может быть running (бот дорабатывает до 30 с),
-          # поэтому running засчитывается только после того, как мы увидели остановку/запуск.
-          starting=0
-          seen_down=0
-          for i in $(seq 1 60); do
-            sleep 5
-            state=$(curl -sS --max-time 20 \
-              "$PANEL_URL/api/client/servers/$SERVER_ID/resources" \
-              -H "Authorization: Bearer $API_KEY" -H 'Accept: application/json' \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["attributes"]["current_state"])' \
-              || echo unknown)
-            echo "[$i] state=$state"
-            case "$state" in
-              running)
-                if [ "$seen_down" = 1 ] || [ "$i" -ge 12 ]; then
-                  echo "Сервер запущен с коммитом ${GITHUB_SHA::7}"
-                  exit 0
-                fi ;;
-              starting)
-                seen_down=1
-                starting=$((starting + 1))
-                if [ "$starting" -ge 12 ]; then
-                  echo "::warning::Сервер в состоянии starting больше минуты. Если бот работает, задайте в яйце строку готовности «Бот запущен»."
-                  exit 0
-                fi ;;
-              stopping|offline)
-                seen_down=1
-                starting=0 ;;
-              *)
-                starting=0 ;;
-            esac
-          done
-          echo "::error::Сервер не запустился за 5 минут — смотрите консоль панели"
-          exit 1
+      - uses: actions/checkout@v6
+      - name: Pterodactyl (${{ env.MODE }})
+        run: python3 deploy/ptero.py "$MODE"
