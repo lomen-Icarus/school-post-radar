@@ -196,7 +196,22 @@ def wait_running(p: Panel, *, require_down: bool, timeout: int = 300) -> bool:
     return False
 
 
+def is_python_server(p: Panel) -> bool:
+    """Защита от ошибки в SERVER_ID: перезапускать можно только сервер на яйце Python с нашим bot.py."""
+    variables, meta = p.startup()
+    startup = str(meta.get("raw_startup_command") or "")
+    if "PY_FILE" not in variables or "python" not in startup.lower():
+        print(
+            f"::error::Сервер не похож на Python-бота (startup: {startup[:120]!r}, "
+            f"переменные: {sorted(variables)}). Ничего не трогаю — проверьте PTERODACTYL_SERVER_ID."
+        )
+        return False
+    return True
+
+
 def deploy(p: Panel) -> int:
+    if not is_python_server(p):
+        return 1
     has_git = any(f["name"] == ".git" for f in p.ls("/"))
     if not has_git:
         print(
@@ -223,7 +238,7 @@ def bootstrap(p: Panel) -> int:
     state = inspect(p)
     variables: dict[str, dict[str, Any]] = state["variables"]
     missing = [k for k in ("GIT_ADDRESS", "AUTO_UPDATE", "PY_FILE") if k not in variables]
-    if missing:
+    if missing or not is_python_server(p):
         print(f"::error::У яйца нет переменных {missing} — это не Python Generic. Нужна смена яйца админом.")
         return 1
     print("Настраиваю переменные Startup:")
