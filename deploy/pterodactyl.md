@@ -22,7 +22,7 @@
 Вкладка **Console**, когда сервер запущен, либо встроенный терминал:
 
 ```bash
-git clone -b claude/zealous-maxwell-wz3u60 https://github.com/lomen-Icarus/school-post-radar.git .
+git clone -b main https://github.com/lomen-Icarus/school-post-radar.git .
 ```
 
 Точка в конце обязательна: файлы должны лежать прямо в `/home/container`, а не в подпапке.
@@ -88,7 +88,7 @@ Python Generic само делает `git pull` и `pip install -r requirements.
 | Переменная | Значение |
 |---|---|
 | `GIT_ADDRESS` / Git Repo Address | `https://github.com/lomen-Icarus/school-post-radar` |
-| `BRANCH` / Install Branch | ветка деплоя (та же, что `DEPLOY_BRANCH` в GitHub) |
+| `BRANCH` / Install Branch | `main` |
 | `AUTO_UPDATE` / Auto Update | `1` (включено) — `git pull` при каждом старте |
 | `PY_FILE` / App py file | `bot.py` (без аргументов запускает бота) |
 | `REQUIREMENTS_FILE` | `requirements.txt` |
@@ -111,8 +111,8 @@ IP-адресами (у GitHub-раннеров они меняются, поэ�
 ### Один раз в GitHub (Settings → Secrets and variables → Actions)
 
 - **Secret** `PTERODACTYL_API_KEY` — ключ из панели.
-- **Variable** `DEPLOY_BRANCH` — ветка деплоя; если не задана, деплоится ветка по умолчанию
-  репозитория.
+- **Variable** `DEPLOY_BRANCH` — не нужна: на сервер уходит ветка `main`. Задайте, только если
+  захотите выкладывать другую ветку.
 - Необязательно: `PTERODACTYL_PANEL_URL` (по умолчанию `https://panel.frienworld.space`)
   и `PTERODACTYL_SERVER_ID` (по умолчанию `75511c5e`).
 

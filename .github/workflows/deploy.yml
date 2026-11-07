@@ -6,7 +6,7 @@
 #
 # Настройка репозитория (Settings -> Secrets and variables -> Actions):
 #   secret   PTERODACTYL_API_KEY    — Client API key панели (ptlc_...), Account -> API Credentials
-#   variable DEPLOY_BRANCH          — ветка, которая уходит на сервер (по умолчанию — ветка по умолчанию репозитория)
+#   variable DEPLOY_BRANCH          — необязательно, ветка, которая уходит на сервер (по умолчанию main)
 #   variable PTERODACTYL_PANEL_URL  — необязательно, по умолчанию https://panel.frienworld.space
 #   variable PTERODACTYL_SERVER_ID  — необязательно, по умолчанию 75511c5e
 name: CI / Deploy
@@ -40,7 +40,7 @@ jobs:
     needs: test
     if: >-
       github.event_name != 'pull_request' &&
-      github.ref_name == (vars.DEPLOY_BRANCH || github.event.repository.default_branch)
+      github.ref_name == (vars.DEPLOY_BRANCH || 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Деплои не идут параллельно; новый push дожидается окончания предыдущего, а не обрывает его.
